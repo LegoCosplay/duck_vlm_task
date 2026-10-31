@@ -92,4 +92,11 @@ def load_mujoco_with_bam_from_spec(spec, bam_model, timestep: float, vin_drop_ga
 bam_model = load_bam_model(kp_fw, vin, current_limit)
 model, data, bam_ctrl, _bam_names = load_mujoco_with_bam_from_spec(
     spec, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
-mujoco.viewer.launch(model, data)
+# mujoco.viewer.launch(model, data)
+
+with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+    while viewer.is_running():# and not quit_requested:
+        # step_start = time.time()
+        bam_ctrl.update()
+        mujoco.mj_step(model, data)
+        viewer.sync()
