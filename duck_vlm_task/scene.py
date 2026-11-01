@@ -1,5 +1,7 @@
+import math
 import os
 import time
+from mjlab_microduck.pickup import model
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -57,14 +59,19 @@ def load_mujoco_with_bam_from_spec(spec, bam_model, timestep: float, vin_drop_ga
 def main():
     # 初期化（spec読み込みとボールの追加）
     xml_path = MICRODUCK_BALL_XML
-    walking_onnx_path = os.path.join(base_path, "policies/alpha_walking.onnx")
-    standing_onnx_path = os.path.join(base_path, "policies/alpha_stand.onnx")
+    velstand_onnx_path = os.path.join(base_path, "policies/velstand.onnx")
+    # walking_onnx_path = os.path.join(base_path, "policies/alpha_walking.onnx")
+    # standing_onnx_path = os.path.join(base_path, "policies/alpha_stand.onnx")
     kick_left_onnx_path = os.path.join(base_path, "policies/ball_kick_left.onnx")
     kick_right_onnx_path = os.path.join(base_path, "policies/ball_kick_right.onnx")
     decimation = 4
     BALL_OFFSET_X = 0.09
     BALL_OFFSET_ABS_Y = 0.042
     BALL_RADIUS = 0.035
+
+    # オレンジボールの位置
+    # 0.3, 0, 0.035(x,y,z)
+    # ORANGE_BALL_POS = [0.3, 0]
 
     print(f"Loading MuJoCo model from: {xml_path}")
     spec = mujoco.MjSpec.from_file(xml_path)
@@ -107,8 +114,10 @@ def main():
     control_dt = decimation * model.opt.timestep # 実時間でやると転ぶ時と、転ばないときがあるので、sim時間で動かす
 
     # Initialize policy
-    policy = PolicyInference(model, data, bam_ctrl=bam_ctrl, new_cmd_obs=True, use_projected_gravity=True, walking_onnx_path=walking_onnx_path, standing_onnx_path=standing_onnx_path, kick_left_onnx_path=kick_left_onnx_path, kick_right_onnx_path=kick_right_onnx_path)
+    policy = PolicyInference(model, data, bam_ctrl=bam_ctrl, new_cmd_obs=True, use_projected_gravity=True, walking_onnx_path=velstand_onnx_path, standing_onnx_path=velstand_onnx_path, kick_left_onnx_path=kick_left_onnx_path, kick_right_onnx_path=kick_right_onnx_path)
     policy.set_vel_cmd(0,0,0)
+
+    policy.ball_qpos_adr = None # ballがワープするのをふせぐ
 
     # ローラーブレードじゃないときは以下の値
     policy.vel_max_x = 0.3
@@ -116,6 +125,10 @@ def main():
     policy.vel_max_y = 0.2
     policy.vel_min_y = -0.2
     policy.vel_max_ang = 1.5
+
+    Kx = 1.5
+    Ky = 0.5
+    Kyaw = 1.0
 
     # 初期姿勢
     freejoint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
@@ -160,14 +173,42 @@ def main():
             elapsed = time.time() - start_time
             if phase=="wait" and data.time > 1.0:
                 policy.set_vel_cmd(0.3, 0, 0) # 前進
-                phase = "walk"
-            elif phase=="walk" and data.time > 2.5:
-                policy.set_vel_cmd(0, 0, 0) # 停止
-                phase = "stop"
-            elif phase=="stop" and data.time > 4.0:
+                phase = "approach"
+            # elif phase=="walk" and data.time > 2.5:
+            #     policy.set_vel_cmd(0, 0, 0) # 停止
+            #     phase = "stop"
+
+            elif phase=="approach":
+                # ロボットの現在位置とヨー角（ワールド座標系）
+                x, y = float(data.qpos[qpos_adr]), float(data.qpos[qpos_adr + 1])
+                qw, qx, qy, qz = data.qpos[qpos_adr + 3:qpos_adr + 7]
+                yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+                off_y = BALL_OFFSET_ABS_Y #left_kickの時はボールを左に寄せる
+                # ボールを蹴りやすい位置（ワールド座標）
+                bx = x + math.cos(yaw) * BALL_OFFSET_X - math.sin(yaw) * off_y
+                by = y + math.sin(yaw) * BALL_OFFSET_X + math.cos(yaw) * off_y
+                # ボールを蹴りやすい位置と、実際のボールの位置の差（ワールド座標）
+                dx = data.body("ball").xpos[0] - bx # ボールが奥にあれば、正の値になるように定義した
+                dy = data.body("ball").xpos[1] - by
+                # ロボット座標の誤差
+                dx_robot = math.cos(-yaw) * dx - math.sin(-yaw) * dy
+                dy_robot = math.sin(-yaw) * dx + math.cos(-yaw) * dy
+                dyaw_robot = math.atan2(dy_robot, dx_robot)
+                if abs(dx_robot) < 0.02 and abs(dy_robot) < 0.02:
+                    policy.set_vel_cmd(0, 0, 0)
+                    phase = "stop"
+                    waituntil = data.time + 1.0
+                else:
+                    vx = Kx * dx_robot
+                    vy = Ky * dy_robot
+                    vyaw = Kyaw * dyaw_robot
+                    vx = np.clip(vx, policy.vel_min_x, policy.vel_max_x)
+                    vy = np.clip(vy, policy.vel_min_y, policy.vel_max_y)
+                    vyaw = np.clip(vyaw, -policy.vel_max_ang, policy.vel_max_ang)
+                    policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
+            elif phase=="stop" and data.time > waituntil:
                 policy.trigger_behavior("kick_left")
                 phase = "kick"
-
 
 if __name__ == "__main__":
     main()
