@@ -130,12 +130,18 @@ def main():
     policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 
+    # phase 0: [wait] 立って待つ→1秒経過後前進指令
+    # phase 1: [walk] 前進→n秒経過後停止指令
+    # phase 2: [stop] 停止して待機→1秒経過後キック
+    # phase 3: [kick] キック→キックが終わったら待機
+
     # loopで使うためにはlaunch_passiveを使う（自分の処理を挟むにはこちらでやる必要あり）
     with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
         start_time = time.time()
         prev_step_time = start_time
         kicked = False
-        
+        phase = "wait"
+
         while viewer.is_running():# and not quit_requested:
             step_start = time.time()
 
@@ -152,9 +158,15 @@ def main():
 
             viewer.sync()
             elapsed = time.time() - start_time
-            if data.time > 3.0 and not kicked:
-                policy.trigger_behavior("kick_left") # 3秒経過したらボールを蹴る
-                kicked = True
+            if phase=="wait" and data.time > 1.0:
+                policy.set_vel_cmd(0.3, 0, 0) # 前進
+                phase = "walk"
+            elif phase=="walk" and data.time > 2.5:
+                policy.set_vel_cmd(0, 0, 0) # 停止
+                phase = "stop"
+            elif phase=="stop" and data.time > 4.0:
+                policy.trigger_behavior("kick_left")
+                phase = "kick"
 
 
 if __name__ == "__main__":
