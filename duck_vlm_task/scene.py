@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -61,7 +62,9 @@ def main():
     kick_left_onnx_path = os.path.join(base_path, "policies/ball_kick_left.onnx")
     kick_right_onnx_path = os.path.join(base_path, "policies/ball_kick_right.onnx")
     decimation = 4
-
+    BALL_OFFSET_X = 0.09
+    BALL_OFFSET_ABS_Y = 0.042
+    BALL_RADIUS = 0.035
 
     print(f"Loading MuJoCo model from: {xml_path}")
     spec = mujoco.MjSpec.from_file(xml_path)
@@ -101,9 +104,10 @@ def main():
     model, data, bam_ctrl, _bam_names = load_mujoco_with_bam_from_spec(
         spec, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
     # mujoco.viewer.launch(model, data)
+    control_dt = decimation * model.opt.timestep # 実時間でやると転ぶ時と、転ばないときがあるので、sim時間で動かす
 
     # Initialize policy
-    policy = PolicyInference(model, data, bam_ctrl=bam_ctrl, new_cmd_obs=True, walking_onnx_path=walking_onnx_path, standing_onnx_path=standing_onnx_path, kick_left_onnx_path=kick_left_onnx_path, kick_right_onnx_path=kick_right_onnx_path)
+    policy = PolicyInference(model, data, bam_ctrl=bam_ctrl, new_cmd_obs=True, use_projected_gravity=True, walking_onnx_path=walking_onnx_path, standing_onnx_path=standing_onnx_path, kick_left_onnx_path=kick_left_onnx_path, kick_right_onnx_path=kick_right_onnx_path)
     policy.set_vel_cmd(0,0,0)
 
     # ローラーブレードじゃないときは以下の値
@@ -128,10 +132,17 @@ def main():
 
     # loopで使うためにはlaunch_passiveを使う（自分の処理を挟むにはこちらでやる必要あり）
     with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+        start_time = time.time()
+        prev_step_time = start_time
+        kicked = False
+        
         while viewer.is_running():# and not quit_requested:
-            # step_start = time.time()
-            # bam_ctrl.update()
-            # mujoco.mj_step(model, data)
+            step_start = time.time()
+
+            actual_dt = step_start - prev_step_time
+            prev_step_time = step_start
+            policy.update_behavior(control_dt)
+
             action = policy.infer()
             policy.apply_action(action)
 
@@ -140,6 +151,11 @@ def main():
                 mujoco.mj_step(model, data)
 
             viewer.sync()
+            elapsed = time.time() - start_time
+            if data.time > 3.0 and not kicked:
+                policy.trigger_behavior("kick_left") # 3秒経過したらボールを蹴る
+                kicked = True
+
 
 if __name__ == "__main__":
     main()
