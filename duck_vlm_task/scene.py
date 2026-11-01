@@ -1,7 +1,7 @@
 import math
 import os
 import time
-from mjlab_microduck.pickup import model
+# from mjlab_microduck.pickup import model
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -55,8 +55,35 @@ def load_mujoco_with_bam_from_spec(spec, bam_model, timestep: float, vin_drop_ga
           f"armature={bam_model.actuator.get_extra_inertia():.2e}")
     return model, data, bam_ctrl, names
 
-
 def main():
+    def get_vel_approach(target):
+        # ロボットの現在位置とヨー角（ワールド座標系）
+        x, y = float(data.qpos[qpos_adr]), float(data.qpos[qpos_adr + 1])
+        qw, qx, qy, qz = data.qpos[qpos_adr + 3:qpos_adr + 7]
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        off_y = BALL_OFFSET_ABS_Y #left_kickの時はボールを左に寄せる
+        # ボールを蹴りやすい位置（ワールド座標）
+        bx = x + math.cos(yaw) * BALL_OFFSET_X - math.sin(yaw) * off_y
+        by = y + math.sin(yaw) * BALL_OFFSET_X + math.cos(yaw) * off_y
+        # ボールを蹴りやすい位置と、実際のボールの位置の差（ワールド座標）
+        dx = data.body(target).xpos[0] - bx # ボールが奥にあれば、正の値になるように定義した
+        dy = data.body(target).xpos[1] - by
+        # ロボット座標の誤差
+        dx_robot = math.cos(-yaw) * dx - math.sin(-yaw) * dy
+        dy_robot = math.sin(-yaw) * dx + math.cos(-yaw) * dy
+        dyaw_robot = math.atan2(dy_robot, dx_robot)
+        if abs(dx_robot) < 0.02 and abs(dy_robot) < 0.02:
+            return 0,0,0 # 閾値内に入ったら停止する
+        else:
+            vx = Kx * dx_robot
+            vy = Ky * dy_robot
+            vyaw = Kyaw * dyaw_robot
+            vx = np.clip(vx, policy.vel_min_x, policy.vel_max_x)
+            vy = np.clip(vy, policy.vel_min_y, policy.vel_max_y)
+            vyaw = np.clip(vyaw, -policy.vel_max_ang, policy.vel_max_ang)
+            # policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
+            return vx, vy, vyaw
+
     # 初期化（spec読み込みとボールの追加）
     xml_path = MICRODUCK_BALL_XML
     velstand_onnx_path = os.path.join(base_path, "policies/velstand.onnx")
@@ -154,6 +181,8 @@ def main():
         prev_step_time = start_time
         kicked = False
         phase = "wait"
+        waituntil = 0.0
+        target = None
 
         while viewer.is_running():# and not quit_requested:
             step_start = time.time()
@@ -174,41 +203,33 @@ def main():
             if phase=="wait" and data.time > 1.0:
                 policy.set_vel_cmd(0.3, 0, 0) # 前進
                 phase = "approach"
-            # elif phase=="walk" and data.time > 2.5:
-            #     policy.set_vel_cmd(0, 0, 0) # 停止
-            #     phase = "stop"
-
+                target = "ball" # 1個目のオレンジのボールをターゲットにする
             elif phase=="approach":
-                # ロボットの現在位置とヨー角（ワールド座標系）
-                x, y = float(data.qpos[qpos_adr]), float(data.qpos[qpos_adr + 1])
-                qw, qx, qy, qz = data.qpos[qpos_adr + 3:qpos_adr + 7]
-                yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-                off_y = BALL_OFFSET_ABS_Y #left_kickの時はボールを左に寄せる
-                # ボールを蹴りやすい位置（ワールド座標）
-                bx = x + math.cos(yaw) * BALL_OFFSET_X - math.sin(yaw) * off_y
-                by = y + math.sin(yaw) * BALL_OFFSET_X + math.cos(yaw) * off_y
-                # ボールを蹴りやすい位置と、実際のボールの位置の差（ワールド座標）
-                dx = data.body("ball").xpos[0] - bx # ボールが奥にあれば、正の値になるように定義した
-                dy = data.body("ball").xpos[1] - by
-                # ロボット座標の誤差
-                dx_robot = math.cos(-yaw) * dx - math.sin(-yaw) * dy
-                dy_robot = math.sin(-yaw) * dx + math.cos(-yaw) * dy
-                dyaw_robot = math.atan2(dy_robot, dx_robot)
-                if abs(dx_robot) < 0.02 and abs(dy_robot) < 0.02:
-                    policy.set_vel_cmd(0, 0, 0)
+                vx, vy, vyaw =get_vel_approach(target)
+                policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
+                if (vx, vy, vyaw) == (0,0,0):
                     phase = "stop"
                     waituntil = data.time + 1.0
-                else:
-                    vx = Kx * dx_robot
-                    vy = Ky * dy_robot
-                    vyaw = Kyaw * dyaw_robot
-                    vx = np.clip(vx, policy.vel_min_x, policy.vel_max_x)
-                    vy = np.clip(vy, policy.vel_min_y, policy.vel_max_y)
-                    vyaw = np.clip(vyaw, -policy.vel_max_ang, policy.vel_max_ang)
-                    policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
             elif phase=="stop" and data.time > waituntil:
                 policy.trigger_behavior("kick_left")
                 phase = "kick"
+                if target == "my_blue_sphere":
+                    phase = "done"
+                    target = None
+                    # waituntil = data.time + 3.0
+                else:
+                    target = "my_blue_sphere" # 2個目の青いボールをターゲットにする
+                    waituntil = data.time + 2.0
+            elif target=="my_blue_sphere" and data.time > waituntil:
+                vx, vy, vyaw =get_vel_approach(target)
+                policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
+                if (vx, vy, vyaw) == (0,0,0):
+                    phase = "stop"
+                    waituntil = data.time + 1.0
+            elif phase== "done":
+                policy.set_vel_cmd(0,0,0)
+                pass
+
 
 if __name__ == "__main__":
     main()
