@@ -79,6 +79,8 @@ def main():
             vy = Ky * dy_robot
             vyaw = Kyaw * dyaw_robot
             vx = np.clip(vx, policy.vel_min_x, policy.vel_max_x)
+            if dx_robot > 0.02:
+                vx = max(vx, 0.15) # 前進方向に向かうときは、最低速度を設定する
             vy = np.clip(vy, policy.vel_min_y, policy.vel_max_y)
             vyaw = np.clip(vyaw, -policy.vel_max_ang, policy.vel_max_ang)
             # policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
@@ -123,7 +125,7 @@ def main():
         friction=[0.5, 0.005, 0.0001],
     )
 
-    body.add_freejoint() # freejointはデフォルトでtype=mjJNT_FREEなので省略可能
+    body.add_freejoint(name="blue_ball_free") # freejointはデフォルトでtype=mjJNT_FREEなので省略可能
     # model = spec.compile()
     # data = mujoco.MjData(model)
     # print("Legacy MuJoCo position actuators (--no-bam): NOT the actuator the policy was trained with")
@@ -181,7 +183,7 @@ def main():
         prev_step_time = start_time
         kicked = False
         phase = "wait"
-        waituntil = 0.0
+        waituntil = 10.0
         target = None
 
         while viewer.is_running():# and not quit_requested:
@@ -200,7 +202,7 @@ def main():
 
             viewer.sync()
             elapsed = time.time() - start_time
-            if phase=="wait" and data.time > 1.0:
+            if phase=="wait" and data.time > waituntil:
                 policy.set_vel_cmd(0.3, 0, 0) # 前進
                 phase = "approach"
                 target = "ball" # 1個目のオレンジのボールをターゲットにする
@@ -220,14 +222,32 @@ def main():
                 else:
                     target = "my_blue_sphere" # 2個目の青いボールをターゲットにする
                     waituntil = data.time + 2.0
+                    ball_free_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "blue_ball_free")
+                    adr = model.jnt_qposadr[ball_free_id]
+                    data.qpos[adr:adr+3] = [0.3, -0.5, 0.2] # ボールを上から降らせる
+                    data.qpos[adr+3:adr+7] = [1, 0, 0, 0]
+                    dof = model.jnt_dofadr[ball_free_id]
+                    data.qvel[dof: dof + 6] = [0, 0, 0, 0, 0, 0]
+
             elif target=="my_blue_sphere" and data.time > waituntil:
                 vx, vy, vyaw =get_vel_approach(target)
                 policy.set_vel_cmd(vx, vy, vyaw) # 目的方向に向かう
                 if (vx, vy, vyaw) == (0,0,0):
                     phase = "stop"
                     waituntil = data.time + 1.0
-            elif phase== "done":
+            elif phase== "done" and policy.behavior_mode is None:
                 policy.set_vel_cmd(0,0,0)
+                ball_free_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "ball_free")
+                adr = model.jnt_qposadr[ball_free_id]
+                data.qpos[adr:adr+3] = [0.3, 0, 0.2] # ボールを上から降らせる
+                data.qpos[adr+3:adr+7] = [1, 0, 0, 0]
+                dof = model.jnt_dofadr[ball_free_id]
+                data.qvel[dof: dof + 6] = [0, 0, 0, 0, 0, 0]
+
+                # model.jnt_qposadr[blue_ball_id] = [0.3, -0.5, 0.2]
+                target = "ball"
+                phase = "wait"
+                waituntil = data.time + 2.0
                 pass
 
 
